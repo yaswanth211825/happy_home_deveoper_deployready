@@ -50,8 +50,8 @@ const roomTools: { type: Tool; icon: typeof Bed; label: string; color: string }[
 ]
 
 const GRID_SIZE = 20 // Each cell = 1 foot
-const CANVAS_WIDTH = 800
-const CANVAS_HEIGHT = 600
+const MIN_CANVAS_SIZE = 400
+const PADDING = 100 // Extra padding around plot
 
 export default function AIPlaygroundPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -68,6 +68,22 @@ export default function AIPlaygroundPage() {
   const [plotWidth, setPlotWidth] = useState(40) // feet
   const [plotLength, setPlotLength] = useState(30) // feet
   const [showMeasurements, setShowMeasurements] = useState(true)
+  const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [isPanning, setIsPanning] = useState(false)
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 })
+  const [showPlotBoundary, setShowPlotBoundary] = useState(true)
+  const [isDragging, setIsDragging] = useState(false)
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
+  const [isResizing, setIsResizing] = useState(false)
+  const [resizeHandle, setResizeHandle] = useState<string | null>(null)
+
+  // Calculate canvas dimensions based on plot size
+  const canvasWidth = Math.max(MIN_CANVAS_SIZE, plotWidth * GRID_SIZE + PADDING * 2)
+  const canvasHeight = Math.max(MIN_CANVAS_SIZE, plotLength * GRID_SIZE + PADDING * 2)
+  const plotStartX = PADDING
+  const plotStartY = PADDING
+  const plotEndX = plotStartX + plotWidth * GRID_SIZE
+  const plotEndY = plotStartY + plotLength * GRID_SIZE
 
   // Snap to grid
   const snapToGrid = useCallback((value: number) => {
@@ -117,6 +133,20 @@ export default function AIPlaygroundPage() {
       ctx.stroke()
     }
 
+    // Draw plot boundary with dotted line
+    if (showPlotBoundary) {
+      ctx.strokeStyle = "#ef4444"
+      ctx.lineWidth = 3
+      ctx.setLineDash([10, 10])
+      ctx.strokeRect(plotStartX, plotStartY, plotWidth * GRID_SIZE, plotLength * GRID_SIZE)
+      ctx.setLineDash([])
+      
+      // Draw plot dimensions
+      ctx.fillStyle = "#ef4444"
+      ctx.font = "bold 14px Inter, sans-serif"
+      ctx.fillText(`Plot: ${plotWidth}ft × ${plotLength}ft`, plotStartX + 10, plotStartY - 10)
+    }
+
     // Draw scale indicator
     ctx.fillStyle = "#374151"
     ctx.font = "11px Inter, sans-serif"
@@ -137,6 +167,22 @@ export default function AIPlaygroundPage() {
       ctx.strokeStyle = isSelected ? "#1e40af" : tool.color
       ctx.lineWidth = isSelected ? 3 : 2
       ctx.strokeRect(element.x, element.y, element.width, element.height)
+
+      // Draw resize handles if selected
+      if (isSelected) {
+        const handleSize = 8
+        ctx.fillStyle = "#1e40af"
+        // Corner handles
+        ctx.fillRect(element.x - handleSize/2, element.y - handleSize/2, handleSize, handleSize)
+        ctx.fillRect(element.x + element.width - handleSize/2, element.y - handleSize/2, handleSize, handleSize)
+        ctx.fillRect(element.x - handleSize/2, element.y + element.height - handleSize/2, handleSize, handleSize)
+        ctx.fillRect(element.x + element.width - handleSize/2, element.y + element.height - handleSize/2, handleSize, handleSize)
+        // Edge handles
+        ctx.fillRect(element.x + element.width/2 - handleSize/2, element.y - handleSize/2, handleSize, handleSize)
+        ctx.fillRect(element.x + element.width/2 - handleSize/2, element.y + element.height - handleSize/2, handleSize, handleSize)
+        ctx.fillRect(element.x - handleSize/2, element.y + element.height/2 - handleSize/2, handleSize, handleSize)
+        ctx.fillRect(element.x + element.width - handleSize/2, element.y + element.height/2 - handleSize/2, handleSize, handleSize)
+      }
 
       // Draw label
       ctx.fillStyle = "#1f2937"
@@ -199,7 +245,7 @@ export default function AIPlaygroundPage() {
         ctx.fillText(`${widthFt}ft x ${heightFt}ft`, startPos.x + 8, startPos.y - 8)
       }
     }
-  }, [elements, isDrawing, startPos, currentPos, selectedTool, selectedElement, showMeasurements])
+  }, [elements, isDrawing, startPos, currentPos, selectedTool, selectedElement, showMeasurements, canvasWidth, canvasHeight, plotStartX, plotStartY, plotWidth, plotLength, showPlotBoundary])
 
   useEffect(() => {
     drawCanvas()
@@ -210,16 +256,53 @@ export default function AIPlaygroundPage() {
     if (!canvas) return { x: 0, y: 0 }
     const rect = canvas.getBoundingClientRect()
     return {
-      x: snapToGrid((e.clientX - rect.left) / scale),
-      y: snapToGrid((e.clientY - rect.top) / scale),
+      x: snapToGrid((e.clientX - rect.left) / scale - offset.x),
+      y: snapToGrid((e.clientY - rect.top) / scale - offset.y),
     }
   }
 
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
+    // Only zoom when Ctrl/Cmd key is held, otherwise allow normal scroll
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault()
+      const delta = e.deltaY > 0 ? -0.05 : 0.05
+      setScale((s) => Math.max(0.1, Math.min(5, s + delta)))
+    }
+  }, [])
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Middle mouse button or space+left click for panning
+    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+      setIsPanning(true)
+      setPanStart({ x: e.clientX - offset.x, y: e.clientY - offset.y })
+      return
+    }
+
     const pos = getCanvasCoordinates(e)
 
     if (selectedTool === "select") {
-      // Check if clicking on an element
+      // Check if clicking on selected element's resize handle
+      if (selectedElement) {
+        const element = elements.find(el => el.id === selectedElement)
+        if (element) {
+          const handle = getResizeHandle(element, pos)
+          if (handle) {
+            setIsResizing(true)
+            setResizeHandle(handle)
+            setStartPos(pos)
+            return
+          }
+          // Check if clicking inside selected element to drag
+          if (pos.x >= element.x && pos.x <= element.x + element.width &&
+              pos.y >= element.y && pos.y <= element.y + element.height) {
+            setIsDragging(true)
+            setDragOffset({ x: pos.x - element.x, y: pos.y - element.y })
+            return
+          }
+        }
+      }
+
+      // Check if clicking on a new element
       const clickedElement = [...elements].reverse().find(
         (el) => pos.x >= el.x && pos.x <= el.x + el.width && pos.y >= el.y && pos.y <= el.y + el.height
       )
@@ -243,12 +326,93 @@ export default function AIPlaygroundPage() {
   }
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return
+    if (isPanning) {
+      setOffset({
+        x: e.clientX - panStart.x,
+        y: e.clientY - panStart.y,
+      })
+      return
+    }
+
     const pos = getCanvasCoordinates(e)
+
+    // Handle dragging selected element
+    if (isDragging && selectedElement) {
+      setElements(prev => prev.map(el => {
+        if (el.id === selectedElement) {
+          return {
+            ...el,
+            x: snapToGrid(pos.x - dragOffset.x),
+            y: snapToGrid(pos.y - dragOffset.y)
+          }
+        }
+        return el
+      }))
+      return
+    }
+
+    // Handle resizing selected element
+    if (isResizing && selectedElement && resizeHandle) {
+      setElements(prev => prev.map(el => {
+        if (el.id === selectedElement) {
+          let newX = el.x
+          let newY = el.y
+          let newWidth = el.width
+          let newHeight = el.height
+
+          // Update based on resize handle
+          if (resizeHandle.includes('w')) {
+            newWidth = el.width + (el.x - pos.x)
+            newX = pos.x
+          }
+          if (resizeHandle.includes('e')) {
+            newWidth = pos.x - el.x
+          }
+          if (resizeHandle.includes('n')) {
+            newHeight = el.height + (el.y - pos.y)
+            newY = pos.y
+          }
+          if (resizeHandle.includes('s')) {
+            newHeight = pos.y - el.y
+          }
+
+          // Ensure minimum size
+          if (Math.abs(newWidth) >= GRID_SIZE && Math.abs(newHeight) >= GRID_SIZE) {
+            return {
+              ...el,
+              x: snapToGrid(newWidth < 0 ? newX + newWidth : newX),
+              y: snapToGrid(newHeight < 0 ? newY + newHeight : newY),
+              width: Math.abs(newWidth),
+              height: Math.abs(newHeight)
+            }
+          }
+        }
+        return el
+      }))
+      return
+    }
+
+    if (!isDrawing) return
     setCurrentPos(pos)
   }
 
   const handleMouseUp = () => {
+    if (isPanning) {
+      setIsPanning(false)
+      return
+    }
+
+    if (isDragging) {
+      setIsDragging(false)
+      return
+    }
+
+    if (isResizing) {
+      setIsResizing(false)
+      setResizeHandle(null)
+      return
+    }
+
     if (!isDrawing) return
 
     const width = currentPos.x - startPos.x
@@ -437,6 +601,18 @@ export default function AIPlaygroundPage() {
                       Show measurements
                     </Label>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="showPlotBoundary"
+                      checked={showPlotBoundary}
+                      onChange={(e) => setShowPlotBoundary(e.target.checked)}
+                      className="rounded"
+                    />
+                    <Label htmlFor="showPlotBoundary" className="text-sm cursor-pointer">
+                      Show plot boundary
+                    </Label>
+                  </div>
                 </CardContent>
               </Card>
 
@@ -448,8 +624,9 @@ export default function AIPlaygroundPage() {
                 <CardContent className="text-sm text-muted-foreground space-y-2">
                   <p>1. Select a room type from tools</p>
                   <p>2. Click and drag on canvas to draw</p>
-                  <p>3. Add doors to connect rooms</p>
-                  <p>4. Click Generate for AI suggestions</p>
+                  <p>3. Use Select tool to move/resize rooms</p>
+                  <p>4. Add doors to connect rooms</p>
+                  <p>5. Click Generate for AI suggestions</p>
                 </CardContent>
               </Card>
             </div>
@@ -465,8 +642,9 @@ export default function AIPlaygroundPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => setScale((s) => Math.max(0.5, s - 0.1))}
+                        onClick={() => setScale((s) => Math.max(0.1, s - 0.1))}
                         className="h-8 w-8 p-0"
+                        title="Zoom out"
                       >
                         <ZoomOut className="w-4 h-4" />
                       </Button>
@@ -474,12 +652,23 @@ export default function AIPlaygroundPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => setScale((s) => Math.min(2, s + 0.1))}
+                        onClick={() => setScale((s) => Math.min(5, s + 0.1))}
                         className="h-8 w-8 p-0"
+                        title="Zoom in"
                       >
                         <ZoomIn className="w-4 h-4" />
                       </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => { setScale(1); setOffset({ x: 0, y: 0 }) }}
+                        className="h-8 px-2"
+                        title="Reset view"
+                      >
+                        Reset
+                      </Button>
                     </div>
+                    <span className="text-xs text-muted-foreground">Shift+Drag to pan | Ctrl+Scroll to zoom</span>
                   </div>
                   <div className="flex items-center gap-4">
                     <span className="text-sm text-muted-foreground">
@@ -510,14 +699,18 @@ export default function AIPlaygroundPage() {
                   >
                     <canvas
                       ref={canvasRef}
-                      width={CANVAS_WIDTH}
-                      height={CANVAS_HEIGHT}
+                      width={canvasWidth}
+                      height={canvasHeight}
                       onMouseDown={handleMouseDown}
                       onMouseMove={handleMouseMove}
                       onMouseUp={handleMouseUp}
-                      onMouseLeave={() => setIsDrawing(false)}
-                      className="border-2 border-border rounded-lg cursor-crosshair bg-white shadow-lg"
-                      style={{ cursor: selectedTool === "select" ? "move" : selectedTool === "eraser" ? "pointer" : "crosshair" }}
+                      onMouseLeave={() => { setIsDrawing(false); setIsPanning(false); setIsDragging(false); setIsResizing(false) }}
+                      onWheel={handleWheel}
+                      className="border-2 border-border rounded-lg bg-white shadow-lg"
+                      style={{ 
+                        cursor: isPanning ? "grabbing" : selectedTool === "select" ? "move" : selectedTool === "eraser" ? "pointer" : "crosshair",
+                        transform: `translate(${offset.x}px, ${offset.y}px)`
+                      }}
                     />
                   </div>
                 </div>
