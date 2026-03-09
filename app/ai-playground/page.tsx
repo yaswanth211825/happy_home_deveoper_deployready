@@ -76,6 +76,7 @@ export default function AIPlaygroundPage() {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
   const [isResizing, setIsResizing] = useState(false)
   const [resizeHandle, setResizeHandle] = useState<string | null>(null)
+  const [cursorStyle, setCursorStyle] = useState("crosshair")
 
   // Calculate canvas dimensions based on plot size
   const canvasWidth = Math.max(MIN_CANVAS_SIZE, plotWidth * GRID_SIZE + PADDING * 2)
@@ -270,6 +271,26 @@ export default function AIPlaygroundPage() {
     }
   }, [])
 
+  // Detect which part of element is being clicked (for resize handles)
+  const getResizeHandle = useCallback((element: DrawnElement, pos: { x: number; y: number }) => {
+    const handleSize = 10
+    const { x, y, width, height } = element
+
+    // Corner handles
+    if (Math.abs(pos.x - x) < handleSize && Math.abs(pos.y - y) < handleSize) return "nw"
+    if (Math.abs(pos.x - (x + width)) < handleSize && Math.abs(pos.y - y) < handleSize) return "ne"
+    if (Math.abs(pos.x - x) < handleSize && Math.abs(pos.y - (y + height)) < handleSize) return "sw"
+    if (Math.abs(pos.x - (x + width)) < handleSize && Math.abs(pos.y - (y + height)) < handleSize) return "se"
+
+    // Edge handles
+    if (Math.abs(pos.x - x) < handleSize && pos.y > y && pos.y < y + height) return "w"
+    if (Math.abs(pos.x - (x + width)) < handleSize && pos.y > y && pos.y < y + height) return "e"
+    if (Math.abs(pos.y - y) < handleSize && pos.x > x && pos.x < x + width) return "n"
+    if (Math.abs(pos.y - (y + height)) < handleSize && pos.x > x && pos.x < x + width) return "s"
+
+    return null
+  }, [])
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     // Middle mouse button or space+left click for panning
     if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
@@ -335,6 +356,34 @@ export default function AIPlaygroundPage() {
     }
 
     const pos = getCanvasCoordinates(e)
+
+    // Update cursor based on hover position
+    if (selectedTool === "select" && selectedElement && !isDragging && !isResizing) {
+      const element = elements.find(el => el.id === selectedElement)
+      if (element) {
+        const handle = getResizeHandle(element, pos)
+        if (handle) {
+          const cursorMap: { [key: string]: string } = {
+            'nw': 'nw-resize', 'ne': 'ne-resize', 'sw': 'sw-resize', 'se': 'se-resize',
+            'n': 'n-resize', 's': 's-resize', 'e': 'e-resize', 'w': 'w-resize'
+          }
+          setCursorStyle(cursorMap[handle] || 'move')
+        } else if (pos.x >= element.x && pos.x <= element.x + element.width &&
+                   pos.y >= element.y && pos.y <= element.y + element.height) {
+          setCursorStyle('move')
+        } else {
+          setCursorStyle('default')
+        }
+      }
+    } else if (selectedTool === "eraser") {
+      setCursorStyle('pointer')
+    } else if (selectedTool === "select") {
+      setCursorStyle('default')
+    } else if (isPanning) {
+      setCursorStyle('grabbing')
+    } else {
+      setCursorStyle('crosshair')
+    }
 
     // Handle dragging selected element
     if (isDragging && selectedElement) {
@@ -708,7 +757,7 @@ export default function AIPlaygroundPage() {
                       onWheel={handleWheel}
                       className="border-2 border-border rounded-lg bg-white shadow-lg"
                       style={{ 
-                        cursor: isPanning ? "grabbing" : selectedTool === "select" ? "move" : selectedTool === "eraser" ? "pointer" : "crosshair",
+                        cursor: cursorStyle,
                         transform: `translate(${offset.x}px, ${offset.y}px)`
                       }}
                     />
